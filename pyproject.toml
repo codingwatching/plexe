@@ -44,7 +44,7 @@ litellm = "1.65.8"
 statsmodels = "^0.14.4"
 hypothesis = "^6.125.1"
 numpy = ">=1.23.2,<2.0.0"
-black = "^24.10.0"
+black = "^25.12.0"
 jinja2 = "^3.1.6"
 platformdirs = "^4.3.7"
 mlflow = "^3.0.0rc2"
@@ -81,7 +81,7 @@ all = [
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.4"
 pre-commit = "^4.0.1"
-ruff = "^0.9.1"
+ruff = "^0.14.9"
 jupyterlab = "^4.2.5"
 tox = "^4.14.1"
 kaggle = "1.6.17"
@@ -114,6 +114,13 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
+# Note: we enforce docstrings because scripts/generate_code_index.py relies on them to produce good documentation
+extend-select = [
+    "D100", # Missing docstring in public module
+    "D101", # Missing docstring in public class
+#    "D102", # Missing docstring in public method  TODO: enable gradually
+#    "D103", # Missing docstring in public function  TODO: enable gradually
+]
 ignore = [
     "E203", # Whitespace before ':'
     "E501", # Line length
