@@ -4,9 +4,10 @@ Unit tests for PyTorch model submission.
 
 from __future__ import annotations
 
-import torch
+import pytest
 
-# TODO: Once torch becomes optional, switch this test to pytest.importorskip("torch")
+torch = pytest.importorskip("torch")
+
 
 from plexe.models import BuildContext
 from plexe.tools.submission import get_save_model_fn
