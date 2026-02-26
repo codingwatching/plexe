@@ -32,15 +32,20 @@
 # Default: 1800
 # training_timeout: 1800
 
-# Default epochs for Keras training
+# Default epochs for neural network training (Keras, PyTorch)
+# Type: integer
+# Default: 25
+# nn_default_epochs: 25
+
+# Maximum epochs for neural network training (Keras, PyTorch)
 # Type: integer
 # Default: 50
-# keras_default_epochs: 50
+# nn_max_epochs: 50
 
-# Default batch size for Keras training
+# Default batch size for neural network training (Keras, PyTorch)
 # Type: integer
 # Default: 32
-# keras_default_batch_size: 32
+# nn_default_batch_size: 32
 
 # ------------------------------------------------------------
 # LLM Settings (per agent role)
@@ -112,8 +117,8 @@
 
 # Smolagents verbosity level (0=silent, 1=normal, 2=verbose)
 # Type: integer
-# Default: 1
-# agent_verbosity_level: 1
+# Default: 0
+# agent_verbosity_level: 0
 
 # ------------------------------------------------------------
 # OpenTelemetry Tracing
@@ -291,7 +296,7 @@
 #
 # Uncomment these for quick local testing:
 #
-# agent_verbosity_level: 1
+# agent_verbosity_level: 0
 # max_search_iterations: 5
 # train_sample_size: 10000
 # val_sample_size: 3000

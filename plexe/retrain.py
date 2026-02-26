@@ -4,6 +4,7 @@ Model retraining functionality.
 Retrain existing models with new data using original training pipeline.
 """
 
+import inspect
 import json
 import logging
 import shutil
@@ -177,8 +178,20 @@ def retrain_model(
         # ============================================
         logger.info("Training model on new data...")
 
-        # Load original model to extract architecture (NOT weights)
-        original_model_path = extract_dir / "artifacts" / f"model.{'pkl' if model_type == 'xgboost' else 'keras'}"
+        # Determine model artifact path based on model type
+        artifacts_dir = extract_dir / "artifacts"
+        model_artifact_names = {
+            "xgboost": "model.pkl",
+            "catboost": "model.cbm",
+            "lightgbm": "model.pkl",
+            "keras": "model.keras",
+            "pytorch": "model_class.pkl",
+        }
+        artifact_name = model_artifact_names.get(model_type)
+        if artifact_name is None:
+            raise RetrainingError(f"Unsupported model type: {model_type}")
+
+        original_model_path = artifacts_dir / artifact_name
         if not original_model_path.exists():
             raise RetrainingError(f"Original model not found: {original_model_path}")
 
@@ -195,6 +208,42 @@ def retrain_model(
                 untrained_model = XGBRegressor(**params)
             logger.info("Created new untrained XGBoost model from architecture")
 
+        elif model_type == "catboost":
+            from catboost import CatBoostClassifier, CatBoostRegressor
+
+            # CatBoost uses native format — try classifier first, then regressor
+            try:
+                trained_model = CatBoostClassifier()
+                trained_model.load_model(str(original_model_path))
+                params = trained_model.get_params()
+                untrained_model = CatBoostClassifier(**params)
+            except Exception as exc:
+                logger.debug(
+                    "CatBoost classifier load failed; falling back to regressor",
+                    exc_info=exc,
+                )
+                trained_model = CatBoostRegressor()
+                trained_model.load_model(str(original_model_path))
+                params = trained_model.get_params()
+                untrained_model = CatBoostRegressor(**params)
+            logger.info("Created new untrained CatBoost model from architecture")
+
+        elif model_type == "lightgbm":
+            from lightgbm import LGBMClassifier, LGBMRanker
+
+            trained_model = joblib.load(original_model_path)
+            params = trained_model.get_params()
+
+            if isinstance(trained_model, LGBMClassifier):
+                untrained_model = LGBMClassifier(**params)
+            elif isinstance(trained_model, LGBMRanker):
+                untrained_model = LGBMRanker(**params)
+            else:
+                from lightgbm import LGBMRegressor
+
+                untrained_model = LGBMRegressor(**params)
+            logger.info("Created new untrained LightGBM model from architecture")
+
         elif model_type == "keras":
             # Load trained model to extract architecture config
             trained_model = keras.models.load_model(original_model_path)
@@ -203,10 +252,26 @@ def retrain_model(
             # Rebuild model from config (NO weights loaded - fresh random initialization)
             untrained_model = keras.Model.from_config(config)
             logger.info("Created new untrained Keras model from architecture")
-        else:
-            raise RetrainingError(f"Unsupported model type: {model_type}")
+        elif model_type == "pytorch":
+            import cloudpickle
 
-        # Prepare training kwargs for Keras
+            with open(original_model_path, "rb") as f:
+                trained_model = cloudpickle.load(f)
+
+            # Re-initialize weights (fresh random initialization, recursive for nested modules)
+            def reset_weights(module):
+                if hasattr(module, "reset_parameters"):
+                    try:
+                        module.reset_parameters()
+                    except (AttributeError, NotImplementedError):
+                        pass
+
+            trained_model.apply(reset_weights)
+
+            untrained_model = trained_model
+            logger.info("Created new untrained PyTorch model from architecture")
+
+        # Prepare training kwargs for neural networks
         training_kwargs = {}
         if model_type == "keras":
             # Load optimizer and loss from metadata (if available)
@@ -215,6 +280,36 @@ def retrain_model(
                 training_kwargs["optimizer"] = metadata.get("optimizer_class")
             if "loss_class" in metadata:
                 training_kwargs["loss"] = metadata.get("loss_class")
+            if "epochs" in metadata:
+                training_kwargs["epochs"] = metadata["epochs"]
+            if "batch_size" in metadata:
+                training_kwargs["batch_size"] = metadata["batch_size"]
+        elif model_type == "pytorch":
+            import torch
+
+            # Reconstruct actual optimizer and loss objects from saved metadata
+            if "optimizer_class" in metadata:
+                optimizer_cls = getattr(torch.optim, metadata["optimizer_class"])
+                optimizer_config = metadata.get("optimizer_config", {})
+                if optimizer_config:
+                    signature = inspect.signature(optimizer_cls.__init__)
+                    params = signature.parameters
+                    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+                    if not accepts_kwargs:
+                        allowed = {name for name in params if name not in ("self", "params")}
+                        filtered_config = {key: value for key, value in optimizer_config.items() if key in allowed}
+                        dropped_keys = sorted(set(optimizer_config) - set(filtered_config))
+                        if dropped_keys:
+                            logger.warning(
+                                "Dropping unsupported optimizer args for %s: %s",
+                                optimizer_cls.__name__,
+                                dropped_keys,
+                            )
+                        optimizer_config = filtered_config
+                training_kwargs["optimizer"] = optimizer_cls(untrained_model.parameters(), **optimizer_config)
+            if "loss_class" in metadata:
+                loss_cls = getattr(torch.nn, metadata["loss_class"])
+                training_kwargs["loss"] = loss_cls()
             if "epochs" in metadata:
                 training_kwargs["epochs"] = metadata["epochs"]
             if "batch_size" in metadata:

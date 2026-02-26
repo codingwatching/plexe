@@ -1,6 +1,6 @@
 # Code Index: plexe
 
-> Generated on 2026-02-25 15:52:05
+> Generated on 2026-02-26 13:49:04
 
 Code structure and public interface documentation for the **plexe** package.
 
@@ -150,6 +150,7 @@ Configuration for plexe.
 
 **`Config`** - Configuration for model building workflow.
 - `settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings)` - Customize settings source priority.
+- `validate_nn_training_settings(self) -> 'Config'` - Ensure neural network defaults do not exceed the configured cap.
 - `parse_otel_headers_from_env(self) -> 'Config'` - Parse OTEL_EXPORTER_OTLP_HEADERS (comma-separated key=value pairs).
 
 **Functions:**
@@ -459,6 +460,14 @@ Standard LightGBM predictor - NO Plexe dependencies.
 - `predict(self, x: pd.DataFrame) -> pd.DataFrame` - Make predictions on input DataFrame.
 
 ---
+## `templates/inference/pytorch_predictor.py`
+Standard PyTorch predictor - NO Plexe dependencies.
+
+**`PyTorchPredictor`** - Standalone PyTorch predictor.
+- `__init__(self, model_dir: str)`
+- `predict(self, x: pd.DataFrame) -> pd.DataFrame` - Make predictions on input DataFrame.
+
+---
 ## `templates/inference/xgboost_predictor.py`
 Standard XGBoost predictor - NO Plexe dependencies.
 
@@ -488,6 +497,13 @@ Hardcoded robust LightGBM training loop.
 **Functions:**
 - `train_lightgbm(untrained_model_path: Path, train_uri: str, val_uri: str, output_dir: Path, target_column: str, group_column: str | None) -> dict` - Train LightGBM model directly (no Spark).
 - `main()` - No description
+
+---
+## `templates/training/train_pytorch.py`
+Hardcoded robust PyTorch training loop.
+
+**Functions:**
+- `train_pytorch(untrained_model_path: Path, train_uri: str, val_uri: str, output_dir: Path, target_column: str, epochs: int, batch_size: int) -> dict` - Train PyTorch model directly.
 
 ---
 ## `templates/training/train_xgboost.py`

@@ -1,6 +1,6 @@
 # Code Index: tests
 
-> Generated on 2026-02-25 15:52:05
+> Generated on 2026-02-26 13:49:04
 
 Test suite structure and test case documentation.
 
@@ -96,6 +96,13 @@ Unit tests for core model dataclasses.
 
 **Functions:**
 - `test_build_context_update_and_unknown_key()` - Update should set known fields and reject unknown keys.
+
+---
+## `unit/test_submission_pytorch.py`
+Unit tests for PyTorch model submission.
+
+**Functions:**
+- `test_save_model_pytorch(tmp_path)` - Test PyTorch model submission validation and context scratch storage.
 
 ---
 ## `unit/utils/test_reporting.py`
