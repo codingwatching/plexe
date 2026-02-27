@@ -1,6 +1,6 @@
 # Code Index: tests
 
-> Generated on 2026-02-27 14:59:37
+> Generated on 2026-02-27 15:11:29
 
 Test suite structure and test case documentation.
 
@@ -168,5 +168,13 @@ Unit tests for validation functions.
 - `test_validate_model_definition_unknown_type()` - Test unknown model type fails validation.
 - `test_validate_metric_function_object_success()` - Callable with correct signature should pass.
 - `test_validate_metric_function_object_bad_signature()` - Callable with wrong arg names should fail.
+
+---
+## `unit/workflow/test_model_card.py`
+Unit tests for model card generation.
+
+**Functions:**
+- `test_generate_model_card_full_context(tmp_path: Path) -> None` - No description
+- `test_generate_model_card_minimal_context(tmp_path: Path) -> None` - No description
 
 ---

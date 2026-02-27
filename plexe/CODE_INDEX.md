@@ -1,6 +1,6 @@
 # Code Index: plexe
 
-> Generated on 2026-02-27 14:59:37
+> Generated on 2026-02-27 15:11:29
 
 Code structure and public interface documentation for the **plexe** package.
 
@@ -476,6 +476,13 @@ Standard XGBoost predictor - NO Plexe dependencies.
 **`XGBoostPredictor`** - Standalone XGBoost predictor.
 - `__init__(self, model_dir: str)`
 - `predict(self, x: pd.DataFrame) -> pd.DataFrame` - Make predictions on input DataFrame.
+
+---
+## `templates/packaging/model_card_template.py`
+Model card template generator.
+
+**Functions:**
+- `generate_model_card(context, final_metrics: dict, evaluation_report: Any | None) -> str` - Generate a Markdown model card for the final package.
 
 ---
 ## `templates/training/train_catboost.py`
