@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 from plexe.integrations.base import WorkflowIntegration
 from plexe.config import Config
-from plexe.constants import DirNames, PhaseNames
+from plexe.constants import DirNames, PhaseNames, ScratchKeys
 from plexe.models import BuildContext, Solution, Baseline, Hypothesis, DataLayout, EvaluationReport
 from plexe.execution.training.runner import TrainingRunner
 from plexe.checkpointing import save_checkpoint, load_checkpoint
@@ -204,10 +204,13 @@ def build_model(
         # Phase 2: Data Preparation
         if start_phase <= 2:
             with tracer.start_as_current_span("Phase 2: Data Preparation"):
-                # Use sanitized dataset if available (from Phase 1 column name cleaning)
-                # If resuming from checkpoint and sanitized URI not in context, use original
-                # (Phase 1 checkpoint should have stored the sanitized URI)
-                train_uri_to_use = context.scratch.get("_sanitized_dataset_uri", train_dataset_uri)
+                # Use filtered dataset if available. Note: filtering is applied on top of the
+                # sanitized dataset, so choosing filtered implicitly includes any sanitization.
+                # If no exclusions were applied, filtered == sanitized. If resuming from
+                # checkpoint and URIs not in context, fall back to original.
+                train_uri_to_use = context.scratch.get("_filtered_dataset_uri") or context.scratch.get(
+                    "_sanitized_dataset_uri", train_dataset_uri
+                )
 
                 # Sanitize test dataset too if provided (must match training data schema)
                 test_uri_to_use = test_dataset_uri
@@ -574,6 +577,135 @@ def sanitize_dataset_column_names(spark: SparkSession, dataset_uri: str, context
     return sanitized_uri
 
 
+def _set_noop_filtered_dataset_uri(context: BuildContext, dataset_uri: str) -> str:
+    """Store no-op filtering result in context and return original URI."""
+    context.excluded_columns = []
+    context.scratch["_filtered_dataset_uri"] = dataset_uri
+    return dataset_uri
+
+
+def _get_problematic_columns_payload(context: BuildContext) -> list[object] | None:
+    """Read and validate problematic columns payload from scratch."""
+    problematic_columns = context.scratch.get(ScratchKeys.PROBLEMATIC_COLUMNS, [])
+    if not problematic_columns:
+        logger.info("No problematic columns flagged - skipping exclusion step")
+        return None
+    if not isinstance(problematic_columns, list):
+        logger.warning("Problematic columns payload is not a list - skipping exclusion step")
+        return None
+    return problematic_columns
+
+
+def _build_protected_columns_set(context: BuildContext) -> set[str]:
+    """Build set of columns that can never be excluded."""
+    protected_columns = set(context.output_targets or [])
+    if context.group_column:
+        protected_columns.add(context.group_column)
+    if context.primary_input_column:
+        protected_columns.add(context.primary_input_column)
+    return protected_columns
+
+
+def _normalize_exclusion_reason(raw_reason: object) -> str:
+    """Normalize exclusion reason to a non-empty string."""
+    if isinstance(raw_reason, str) and raw_reason.strip():
+        return raw_reason
+    if not raw_reason:
+        return "unspecified"
+    return str(raw_reason)
+
+
+def _filter_valid_exclusions(
+    problematic_columns: list[object], available_columns: set[str], protected_columns: set[str]
+) -> tuple[list[str], list[dict], list[str], list[str], int]:
+    """Validate exclusion entries and return drop candidates + diagnostics."""
+    columns_to_drop: list[str] = []
+    excluded_entries: list[dict] = []
+    skipped_protected: list[str] = []
+    skipped_missing: list[str] = []
+    invalid_entries = 0
+    seen: set[str] = set()
+
+    for entry in problematic_columns:
+        if not isinstance(entry, dict):
+            invalid_entries += 1
+            continue
+        column = entry.get("column")
+        if not isinstance(column, str) or not column.strip():
+            invalid_entries += 1
+            continue
+        if column in seen:
+            continue
+        seen.add(column)
+        if column in protected_columns:
+            skipped_protected.append(column)
+            continue
+        if column not in available_columns:
+            skipped_missing.append(column)
+            continue
+        columns_to_drop.append(column)
+        excluded_entries.append({"column": column, "reason": _normalize_exclusion_reason(entry.get("reason"))})
+
+    return columns_to_drop, excluded_entries, skipped_protected, skipped_missing, invalid_entries
+
+
+def _exclude_problematic_columns(
+    spark: SparkSession,
+    dataset_uri: str,
+    context: BuildContext,
+    config: Config | None,
+) -> str:
+    """
+    Drop problematic columns identified during Phase 1 analysis.
+
+    Args:
+        spark: SparkSession
+        dataset_uri: Dataset URI to filter (already sanitized)
+        context: Build context with problematic columns and targets
+        config: Configuration (reserved for future use)
+
+    Returns:
+        URI of filtered dataset (or original if no exclusions needed)
+    """
+    _ = config
+    problematic_columns = _get_problematic_columns_payload(context)
+    if problematic_columns is None:
+        return _set_noop_filtered_dataset_uri(context, dataset_uri)
+
+    df = spark.read.parquet(dataset_uri)
+    columns_to_drop, excluded_entries, skipped_protected, skipped_missing, invalid_entries = _filter_valid_exclusions(
+        problematic_columns=problematic_columns,
+        available_columns=set(df.columns),
+        protected_columns=_build_protected_columns_set(context),
+    )
+
+    if skipped_protected:
+        logger.warning(
+            "Problematic columns include protected columns; skipping exclusions for: "
+            + ", ".join(sorted(skipped_protected))
+        )
+    if skipped_missing:
+        logger.warning(
+            "Problematic columns not found in dataset; skipping exclusions for: " + ", ".join(sorted(skipped_missing))
+        )
+    if invalid_entries:
+        logger.warning(f"Skipped {invalid_entries} malformed problematic column entries")
+    if not columns_to_drop:
+        logger.info("No valid problematic columns to exclude after validation")
+        return _set_noop_filtered_dataset_uri(context, dataset_uri)
+
+    logger.info(f"Excluding {len(columns_to_drop)} problematic columns from dataset")
+    for entry in excluded_entries:
+        logger.info(f"  drop '{entry['column']}': {entry['reason']}")
+
+    filtered_uri = f"{context.work_dir}/{DirNames.BUILD_DIR}/data/dataset_filtered.parquet"
+    df.drop(*columns_to_drop).write.mode("overwrite").parquet(filtered_uri)
+    logger.info(f"✓ Filtered dataset saved: {filtered_uri}")
+    context.excluded_columns = excluded_entries
+    context.scratch["_filtered_dataset_uri"] = filtered_uri
+    return filtered_uri
+
+
 def analyze_data(
     spark: SparkSession,
     dataset_uri: str,
@@ -641,6 +773,9 @@ def analyze_data(
     context.update(task_analysis=task_analysis)
     save_report(context.work_dir, "02_task_analysis", task_analysis)
     # Note: output_targets already set by task_agent.run()
+
+    # Step 3b: Exclude problematic columns identified during analysis
+    _exclude_problematic_columns(spark, sanitized_uri, context, config)
 
     # Step 3: Metric Selection
     metric_agent = MetricSelectorAgent(context, config)
@@ -711,6 +846,16 @@ def prepare_data(
 
         # Copy test dataset to DirNames.BUILD_DIR/data/ for consistency
         test_df = spark.read.parquet(test_dataset_uri)
+        if context.excluded_columns:
+            excluded_column_names = [
+                entry.get("column")
+                for entry in context.excluded_columns
+                if isinstance(entry, dict) and entry.get("column")
+            ]
+            columns_to_drop = [col for col in excluded_column_names if col in test_df.columns]
+            if columns_to_drop:
+                test_df = test_df.drop(*columns_to_drop)
+                logger.info(f"Excluded {len(columns_to_drop)} columns from test dataset: {columns_to_drop}")
         test_uri = str(context.work_dir / DirNames.BUILD_DIR / "data" / "test.parquet")
         test_df.write.mode("overwrite").parquet(test_uri)
         logger.info(f"Copied test dataset to: {test_uri}")
