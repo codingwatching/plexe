@@ -14,7 +14,7 @@ from sklearn.pipeline import Pipeline
 from smolagents import tool
 
 from plexe.constants import DirNames, ScratchKeys
-from plexe.models import BuildContext, Metric, Hypothesis, UnifiedPlan
+from plexe.models import BuildContext, Metric, Hypothesis, TaskType, UnifiedPlan
 from plexe.search.insight_store import InsightStore
 from plexe.utils.tracing import tool_span
 from plexe.validation.validators import validate_sklearn_pipeline, validate_pipeline_consistency
@@ -210,7 +210,7 @@ def get_save_model_fn(context: BuildContext, model_type: str, max_epochs: int = 
                 model: Keras model instance (keras.Model)
                 optimizer: Optimizer instance (keras.optimizers.Optimizer)
                 loss: Loss instance (keras.losses.Loss)
-                epochs: Number of training epochs (e.g., 50)
+                epochs: Number of training epochs (e.g., 10)
                 batch_size: Batch size for training (e.g., 32)
 
             Returns:
@@ -259,7 +259,7 @@ def get_save_model_fn(context: BuildContext, model_type: str, max_epochs: int = 
                 model: PyTorch model instance (torch.nn.Module)
                 optimizer: Optimizer instance (torch.optim.Optimizer)
                 loss: Loss instance (torch.nn.Module)
-                epochs: Number of training epochs (e.g., 50)
+                epochs: Number of training epochs (e.g., 10)
                 batch_size: Batch size for training (e.g., 32)
 
             Returns:
@@ -749,6 +749,13 @@ def get_register_eda_report_tool(context: BuildContext):
 
         if problematic_columns is None:
             problematic_columns = []
+
+        # Validate task_type against canonical values
+        _valid_task_types = {t.value for t in TaskType}
+        if task_type not in _valid_task_types:
+            logger.warning(
+                f"Non-canonical task_type '{task_type}' submitted. " f"Valid values: {sorted(_valid_task_types)}"
+            )
 
         # Build structured report
         report = {
@@ -1442,6 +1449,13 @@ def get_register_core_metrics_tool(context: BuildContext):
             Confirmation message
         """
         from plexe.models import CoreMetricsReport
+
+        _valid_task_types = {t.value for t in TaskType}
+        if task_type not in _valid_task_types:
+            logger.warning(
+                f"Non-canonical task_type '{task_type}' in core metrics report. "
+                f"Valid values: {sorted(_valid_task_types)}"
+            )
 
         report = CoreMetricsReport(
             task_type=task_type,

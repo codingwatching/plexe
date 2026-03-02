@@ -49,6 +49,7 @@ help:
 	@echo ""
 	@echo "🏗️  Building:"
 	@echo "  make build              Build default image (PySpark)"
+	@echo "  make build-gpu          Build GPU variant (CUDA + GPU PyTorch, amd64)"
 	@echo "  make build-databricks   Build Databricks variant"
 	@echo ""
 	@echo "🧹 Cleanup:"
@@ -70,21 +71,23 @@ help:
 .PHONY: test-integration
 test-integration:
 	@echo "🧪 Running staged pytest integration suite..."
+	@echo "Using DATALOADER_WORKERS=$${DATALOADER_WORKERS:-0}"
 	@if [ -n "$(INTEGRATION_RUN_ID)" ]; then \
 		echo "Using integration run id: $(INTEGRATION_RUN_ID)"; \
-		PLEXE_IT_RUN_ID="$(INTEGRATION_RUN_ID)" bash scripts/tests/run_integration_staged.sh; \
+		DATALOADER_WORKERS="$${DATALOADER_WORKERS:-0}" PLEXE_IT_RUN_ID="$(INTEGRATION_RUN_ID)" bash scripts/tests/run_integration_staged.sh; \
 	else \
-		bash scripts/tests/run_integration_staged.sh; \
+		DATALOADER_WORKERS="$${DATALOADER_WORKERS:-0}" bash scripts/tests/run_integration_staged.sh; \
 	fi
 
 .PHONY: test-integration-verbose
 test-integration-verbose:
 	@echo "🧪 Running staged pytest integration suite (verbose)..."
+	@echo "Using DATALOADER_WORKERS=$${DATALOADER_WORKERS:-0}"
 	@if [ -n "$(INTEGRATION_RUN_ID)" ]; then \
 		echo "Using integration run id: $(INTEGRATION_RUN_ID)"; \
-		PLEXE_IT_RUN_ID="$(INTEGRATION_RUN_ID)" PLEXE_IT_VERBOSE=1 bash scripts/tests/run_integration_staged.sh; \
+		DATALOADER_WORKERS="$${DATALOADER_WORKERS:-0}" PLEXE_IT_RUN_ID="$(INTEGRATION_RUN_ID)" PLEXE_IT_VERBOSE=1 bash scripts/tests/run_integration_staged.sh; \
 	else \
-		PLEXE_IT_VERBOSE=1 bash scripts/tests/run_integration_staged.sh; \
+		DATALOADER_WORKERS="$${DATALOADER_WORKERS:-0}" PLEXE_IT_VERBOSE=1 bash scripts/tests/run_integration_staged.sh; \
 	fi
 
 # Fast sanity check - 1 iteration, minimal config
@@ -367,6 +370,17 @@ build:
 		-t plexe:py$(PYTHON_VERSION) \
 		-f Dockerfile .
 	@echo "✅ Build complete: plexe:py$(PYTHON_VERSION)"
+
+# Build GPU variant (NVIDIA CUDA + CUDA-enabled PyTorch, amd64 only)
+.PHONY: build-gpu
+build-gpu:
+	@echo "🏗️  Building GPU variant (Python $(PYTHON_VERSION), CUDA)..."
+	docker buildx build --platform linux/amd64 --output type=docker --provenance=false \
+		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
+		--build-arg VARIANT=gpu \
+		-t plexe:py$(PYTHON_VERSION)-gpu \
+		-f Dockerfile .
+	@echo "✅ Build complete: plexe:py$(PYTHON_VERSION)-gpu"
 
 
 # Build Databricks variant
