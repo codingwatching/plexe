@@ -63,6 +63,7 @@ from plexe.templates.features.pipeline_fitter import fit_pipeline
 from plexe.templates.features.pipeline_runner import transform_dataset_via_spark
 from plexe.templates.packaging.model_card_template import generate_model_card
 from plexe.helpers import evaluate_on_sample, select_viable_model_types
+from plexe.validation.validators import canonicalize_split_ratios
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,8 @@ def build_model(
             context = BuildContext.from_dict(checkpoint_data["context"])
             if checkpoint_data.get("search_journal"):
                 journal = SearchJournal.from_dict(checkpoint_data["search_journal"])
+                if context.metric:
+                    journal.optimization_direction = context.metric.optimization_direction
                 context.scratch["_search_journal"] = journal
                 logger.info(f"Restored SearchJournal with {len(journal.nodes)} solutions")
             if checkpoint_data.get("insight_store"):
@@ -437,7 +440,7 @@ def build_model(
 
                 if valid_alternatives:
                     # Sort by performance and pick the best alternative
-                    valid_alternatives.sort(key=lambda s: s.performance, reverse=True)
+                    valid_alternatives.sort(key=journal.sort_key, reverse=True)
                     fallback_solution = valid_alternatives[0]
 
                     logger.info(f"Found {len(valid_alternatives)} valid alternatives")
@@ -915,6 +918,16 @@ def prepare_data(
             else:
                 # Default fallback
                 split_ratios = {"train": 0.7, "val": 0.15, "test": 0.15}
+
+            split_ratios = canonicalize_split_ratios(split_ratios)
+            if not {"train", "val", "test"}.issubset(split_ratios):
+                logger.warning(
+                    "Recommended split ratios are missing one of train/val/test (%s); "
+                    "falling back to default 70/15/15 for final evaluation.",
+                    split_ratios,
+                )
+                split_ratios = {"train": 0.7, "val": 0.15, "test": 0.15}
+
             logger.info("Creating train/val/test splits from single dataset (final evaluation enabled)")
         else:
             # 2-way split: train/val only
@@ -1342,9 +1355,13 @@ def search_models(
     # Use restored journal/insight_store if resuming, otherwise create fresh
     if restored_journal:
         journal = restored_journal
+        journal.optimization_direction = context.metric.optimization_direction
         logger.info(f"Using restored SearchJournal with {len(journal.nodes)} existing solutions")
     else:
-        journal = SearchJournal(baseline=context.heuristic_baseline)
+        journal = SearchJournal(
+            baseline=context.heuristic_baseline,
+            optimization_direction=context.metric.optimization_direction,
+        )
 
     if restored_insight_store:
         insight_store = restored_insight_store
@@ -1786,6 +1803,8 @@ def evaluate_final(
     if context.test_uri:
         logger.info(f"Loading test sample from {context.test_uri}")
         test_df_spark = spark.read.parquet(context.test_uri)
+        # TODO(evaluation-guard): Fail fast with a clear message when test split is empty,
+        # instead of letting downstream evaluator phases fail indirectly.
         # Sample for evaluation (20k-50k rows)
         sample_size = min(50000, test_df_spark.count())
         test_sample_df = test_df_spark.limit(sample_size).toPandas()

@@ -17,7 +17,12 @@ from plexe.constants import DirNames, ScratchKeys
 from plexe.models import BuildContext, Metric, Hypothesis, TaskType, UnifiedPlan
 from plexe.search.insight_store import InsightStore
 from plexe.utils.tracing import tool_span
-from plexe.validation.validators import validate_sklearn_pipeline, validate_pipeline_consistency
+from plexe.validation.validators import (
+    canonicalize_split_ratios,
+    validate_dataset_splits,
+    validate_pipeline_consistency,
+    validate_sklearn_pipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -787,16 +792,22 @@ def get_register_eda_report_tool(context: BuildContext):
     return save_eda_report
 
 
-def get_save_split_uris_tool(context: BuildContext):
+def get_save_split_uris_tool(
+    context: BuildContext, spark: Any | None = None, expected_ratios: dict[str, float] | None = None
+):
     """
     Factory: Returns split URI submission tool.
 
     Args:
         context: Build context for storing result
+        spark: Optional SparkSession for immediate split validation
+        expected_ratios: Optional expected split ratios (train/val/test)
 
     Returns:
         Configured tool
     """
+    normalized_expected = canonicalize_split_ratios(expected_ratios)
+    expects_test_split = normalized_expected.get("test", 0.0) > 0
 
     @tool
     @tool_span
@@ -820,6 +831,19 @@ def get_save_split_uris_tool(context: BuildContext):
         Returns:
             Confirmation message
         """
+        if expects_test_split and not test_uri:
+            raise ValueError("A non-empty test split is required for this run. Provide test_uri.")
+
+        if spark is not None and normalized_expected:
+            is_valid, error_msg = validate_dataset_splits(
+                spark=spark,
+                train_uri=train_uri,
+                val_uri=val_uri,
+                test_uri=test_uri,
+                expected_ratios=normalized_expected,
+            )
+            if not is_valid:
+                raise ValueError(f"Split validation failed: {error_msg}")
 
         # Save URIs to context scratch
         context.scratch["_train_uri"] = train_uri
@@ -960,7 +984,11 @@ def get_validate_baseline_predictor_tool(context: BuildContext, val_sample_df):
             ValueError: If validation or metric computation fails
         """
         import numpy as np
-        from plexe.helpers import compute_metric
+        from plexe.helpers import (
+            compute_metric,
+            metric_requires_probabilities,
+            normalize_probability_predictions,
+        )
 
         # Check class name matches template
         if type(predictor).__name__ != "HeuristicBaselinePredictor":
@@ -974,18 +1002,37 @@ def get_validate_baseline_predictor_tool(context: BuildContext, val_sample_df):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
+        requires_proba = metric_requires_probabilities(context.metric.name)
+        if requires_proba and (not hasattr(predictor, "predict_proba") or not callable(predictor.predict_proba)):
+            error_msg = (
+                f"Primary metric '{context.metric.name}' requires probability scores. "
+                "Baseline predictor must implement callable .predict_proba()"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
         # Test on small validation sample
         try:
             X_test = val_sample_df.drop(columns=context.output_targets, errors="ignore").head(10)
-            predictions = predictor.predict(X_test)
+            predictions = predictor.predict_proba(X_test) if requires_proba else predictor.predict(X_test)
 
-            if not isinstance(predictions, list | tuple | np.ndarray | pd.Series):
-                error_msg = f"predict() must return array-like, got {type(predictions)}"
+            expected_types = (
+                (list, tuple, np.ndarray, pd.Series, pd.DataFrame)
+                if requires_proba
+                else (
+                    list,
+                    tuple,
+                    np.ndarray,
+                    pd.Series,
+                )
+            )
+            if not isinstance(predictions, expected_types):
+                error_msg = f"{'predict_proba' if requires_proba else 'predict'}() must return array-like, got {type(predictions)}"
                 logger.error(error_msg)
                 raise ValueError(error_msg)
 
             if len(predictions) != len(X_test):
-                error_msg = f"predict() returned {len(predictions)} predictions for {len(X_test)} samples"
+                error_msg = f"{'predict_proba' if requires_proba else 'predict'}() returned {len(predictions)} predictions for {len(X_test)} samples"
                 logger.error(error_msg)
                 raise ValueError(error_msg)
 
@@ -998,10 +1045,14 @@ def get_validate_baseline_predictor_tool(context: BuildContext, val_sample_df):
         try:
             X_val = val_sample_df.drop(columns=context.output_targets, errors="ignore")
             y_val = val_sample_df[context.output_targets[0]]
-            y_pred = predictor.predict(X_val)
+            if requires_proba:
+                raw_proba = predictor.predict_proba(X_val)
+                y_pred_input = normalize_probability_predictions(y_val.values, raw_proba, context.metric.name)
+            else:
+                y_pred_input = predictor.predict(X_val)
 
             # This is where squared= errors would happen - agent can now see them!
-            performance = compute_metric(y_true=y_val.values, y_pred=y_pred, metric_name=context.metric.name)
+            performance = compute_metric(y_true=y_val.values, y_pred=y_pred_input, metric_name=context.metric.name)
 
             logger.info(f"Baseline performance: {context.metric.name}={performance:.4f}")
 
@@ -1120,7 +1171,11 @@ def get_evaluate_baseline_performance_tool(context: BuildContext, val_sample_df)
         Returns:
             String with performance metric value
         """
-        from plexe.helpers import compute_metric
+        from plexe.helpers import (
+            compute_metric,
+            metric_requires_probabilities,
+            normalize_probability_predictions,
+        )
 
         # Check prerequisites
         if context.baseline_predictor is None:
@@ -1147,12 +1202,23 @@ def get_evaluate_baseline_performance_tool(context: BuildContext, val_sample_df)
             else None
         )
 
-        # Make predictions (standard array interface)
-        y_pred = context.baseline_predictor.predict(X_val)
+        requires_proba = metric_requires_probabilities(context.metric.name)
+        if requires_proba:
+            if not hasattr(context.baseline_predictor, "predict_proba") or not callable(
+                context.baseline_predictor.predict_proba
+            ):
+                raise ValueError(
+                    f"Metric '{context.metric.name}' requires probability scores but baseline predictor "
+                    "does not implement predict_proba()."
+                )
+            raw_proba = context.baseline_predictor.predict_proba(X_val)
+            y_pred_input = normalize_probability_predictions(y_val.values, raw_proba, context.metric.name)
+        else:
+            y_pred_input = context.baseline_predictor.predict(X_val)
 
         # Compute metric (pass group_ids for ranking metrics)
         performance = compute_metric(
-            y_true=y_val.values, y_pred=y_pred, metric_name=context.metric.name, group_ids=group_ids
+            y_true=y_val.values, y_pred=y_pred_input, metric_name=context.metric.name, group_ids=group_ids
         )
 
         # Save performance

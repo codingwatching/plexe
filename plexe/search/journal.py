@@ -32,19 +32,55 @@ class SearchJournal:
     - Improve nodes (enhancements)
     """
 
-    def __init__(self, baseline: Baseline | None = None):
+    def __init__(self, baseline: Baseline | None = None, optimization_direction: str = "higher"):
         """
         Initialize journal.
 
         Args:
             baseline: Baseline model for comparison
+            optimization_direction: Metric optimization direction ("higher" or "lower")
         """
         self.baseline = baseline
         self.baseline_performance = baseline.performance if baseline else 0.0
+        self.optimization_direction = optimization_direction
 
         self.nodes: list[Solution] = []
         self.successful_attempts = 0
         self.failed_attempts = 0
+
+    @property
+    def optimization_direction(self) -> str:
+        """Metric optimization direction, constrained to {'higher', 'lower'}."""
+        return self._optimization_direction
+
+    @optimization_direction.setter
+    def optimization_direction(self, value: str) -> None:
+        """Validate and set optimization direction."""
+        if value not in {"higher", "lower"}:
+            raise ValueError(f"optimization_direction must be 'higher' or 'lower', got: {value}")
+        self._optimization_direction = value
+
+    def selection_score(self, value: float) -> float:
+        """Normalize a metric value so larger always means better."""
+        return value if self.optimization_direction == "higher" else -value
+
+    def is_better(self, candidate: float, reference: float | None) -> bool:
+        """
+        Compare two metric values using the configured optimization direction.
+
+        Args:
+            candidate: Candidate performance value
+            reference: Reference performance value (or None)
+        """
+        if reference is None:
+            return True
+        return self.selection_score(candidate) > self.selection_score(reference)
+
+    def sort_key(self, node: Solution) -> float:
+        """Direction-aware sort key for solution nodes."""
+        if node.performance is None:
+            return float("-inf")
+        return self.selection_score(node.performance)
 
     # ============================================
     # Adding Nodes
@@ -97,7 +133,12 @@ class SearchJournal:
         good = self.good_nodes
         if not good:
             return None
-        return max(good, key=lambda n: n.performance)
+
+        best = good[0]
+        for candidate in good[1:]:
+            if self.is_better(candidate.performance, best.performance):
+                best = candidate
+        return best
 
     @property
     def best_performance(self) -> float:
@@ -186,11 +227,9 @@ class SearchJournal:
 
         best = self.best_node
         if best:
-            improvement = (
-                (best.performance - self.baseline_performance) / self.baseline_performance * 100
-                if self.baseline_performance > 0
-                else 0
-            )
+            score_delta = self.selection_score(best.performance) - self.selection_score(self.baseline_performance)
+            baseline_scale = abs(self.baseline_performance)
+            improvement = (score_delta / baseline_scale * 100) if baseline_scale > 0 else 0
             summary += (
                 f"  Best: {best.performance:.4f} ({improvement:+.1f}% vs baseline) [solution {best.solution_id}]\n"
             )
@@ -216,10 +255,10 @@ class SearchJournal:
 
         # Look at last N successful attempts
         recent = successful[-window:] if len(successful) > window else successful
-        performances = [n.performance for n in recent]
+        scores = [self.selection_score(n.performance) for n in recent]
 
         # Calculate average delta
-        deltas = [performances[i + 1] - performances[i] for i in range(len(performances) - 1)]
+        deltas = [scores[i + 1] - scores[i] for i in range(len(scores) - 1)]
 
         return sum(deltas) / len(deltas) if deltas else 0.0
 
@@ -258,7 +297,7 @@ class SearchJournal:
         child_nodes = [n for n in self.nodes if n.parent is not None and not n.is_buggy and n.performance is not None]
 
         # Sort by performance
-        child_nodes.sort(key=lambda n: n.performance, reverse=True)
+        child_nodes.sort(key=self.sort_key, reverse=True)
 
         return child_nodes[:limit]
 
@@ -271,6 +310,7 @@ class SearchJournal:
         return {
             "baseline": self.baseline.to_dict() if self.baseline else None,
             "baseline_performance": self.baseline_performance,
+            "optimization_direction": self.optimization_direction,
             "nodes": [node.to_dict() for node in self.nodes],
             "successful_attempts": self.successful_attempts,
             "failed_attempts": self.failed_attempts,
@@ -289,7 +329,10 @@ class SearchJournal:
         baseline = Baseline.from_dict(d["baseline"]) if d.get("baseline") else None
 
         # Create journal
-        journal = SearchJournal(baseline=baseline)
+        journal = SearchJournal(
+            baseline=baseline,
+            optimization_direction=d.get("optimization_direction", "higher"),
+        )
         journal.baseline_performance = d.get("baseline_performance", 0.0)
         journal.successful_attempts = d.get("successful_attempts", 0)
         journal.failed_attempts = d.get("failed_attempts", 0)
